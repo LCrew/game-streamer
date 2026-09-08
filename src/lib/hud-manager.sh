@@ -24,6 +24,16 @@
 # "horizontal" because that's what the bundled default HUD's "default"
 # variant renders as (they're identical layouts).
 : "${HUD_MODE:=horizontal}"
+# The layout actually used. HUD_VARIANT is authoritative when the api set it --
+# INCLUDING when it set it to empty, which means "whatever layout this bundle
+# opens with". An imported HUD declares its own layouts (or none), so handing it
+# `?variant=horizontal` names one its hud.json very likely does not have.
+#
+# `${HUD_VARIANT+isset}` rather than `:=`, because the whole point is telling
+# "set to empty" apart from "not set at all" -- the default form cannot.
+if [ -z "${HUD_VARIANT+isset}" ]; then
+  HUD_VARIANT="$HUD_MODE"
+fi
 # Which HUD *bundle* to load, as opposed to which layout within it. Until the
 # panel grew a HUD library there was only ever one on disk, so this was
 # hardcoded to "default" in three places; the api now resolves it from a
@@ -48,7 +58,7 @@
 : "${API_TOKEN:=}"
 
 export HUD_BIN HUD_PORT HUD_GSI_PORT HUD_HOST HUD_USERDATA \
-       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_ID HUD_BUNDLE_URL \
+       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_VARIANT HUD_ID HUD_BUNDLE_URL \
        HUD_CAMERA_OVERLAY_JS SPEC_BASE
 
 picom_running() { pgrep -x picom >/dev/null 2>&1; }
@@ -103,7 +113,7 @@ start_hud() {
   mkdir -p "$HUD_USERDATA"
   log "starting hud-manager"
   # HUD_AUTO_OVERLAY=1 → auto-overlay.patch opens the bundled `default`
-  # HUD on app-ready. HUD_VARIANT="$HUD_MODE" → the same patch appends
+  # HUD on app-ready. HUD_VARIANT → the same patch appends
   # `?variant=<v>` so the initial layout matches the api-resolved
   # default. --mute-audio so HUD SFX don't leak into the captured
   # stream via the cs2 null sink.
@@ -116,7 +126,7 @@ start_hud() {
   HUD_PORT="$HUD_PORT" \
   GSI_PORT="$HUD_GSI_PORT" \
   HUD_AUTO_OVERLAY=1 \
-  HUD_VARIANT="$HUD_MODE" \
+  HUD_VARIANT="$HUD_VARIANT" \
     spawn_logged hud-manager "$HUD_BIN" --no-sandbox --disable-gpu-sandbox --mute-audio
 }
 
@@ -236,7 +246,7 @@ if isinstance(body, dict) and isinstance(body.get("id"), str):
   # HUD works on a pod that never seeds match data (no MATCH_ID, no API_BASE).
   if ! curl -fsS -m 10 -X POST -o /dev/null \
        -H 'content-type: application/json' \
-       --data "{\"hudId\":\"${HUD_ID}\",\"variant\":\"${HUD_MODE:-horizontal}\"}" \
+       --data "{\"hudId\":\"${HUD_ID}\",\"variant\":\"${HUD_VARIANT}\"}" \
        "http://${HUD_HOST}:${HUD_PORT}/api/overlay/start"; then
     warn "installed $HUD_ID but the overlay would not switch to it"
     return 1

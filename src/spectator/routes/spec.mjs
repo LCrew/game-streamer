@@ -129,7 +129,10 @@ export async function hudHandler(_req, res, body) {
 // existed (`default`), and the id was hardcoded. It is still honoured as the
 // seed variant so an api that has never heard of HUD_ID behaves as before.
 let activeHudId = process.env.HUD_ID || "default";
-let activeHudVariant = process.env.HUD_VARIANT || process.env.HUD_MODE || "horizontal";
+// ?? not ||: an empty HUD_VARIANT is a real answer ("the bundle's own
+// layout"), and || would discard it for the legacy HUD_MODE fallback.
+let activeHudVariant =
+  process.env.HUD_VARIANT ?? process.env.HUD_MODE ?? "horizontal";
 
 async function startOverlay(hudId, variant) {
   const r = await fetch(`http://${HUD_HOST}:${HUD_PORT}/api/overlay/start`, {
