@@ -137,6 +137,10 @@ if [ "$HUD_DEFERRED" = "1" ]; then
     wait_for_hud_server 30 || true
   fi
   if hud_server_up; then
+    # Before the overlay is opened against it. install_custom_hud is a no-op
+    # unless the api stamped HUD_BUNDLE_URL, and it falls back to the bundled
+    # HUD on every failure rather than leaving the stream without one.
+    install_custom_hud || true
     hide_hud_admin_window
     position_hud_overlay || warn "early overlay positioning failed — will retry after cs2"
   else
@@ -169,9 +173,12 @@ if [ -n "${MATCH_ID:-}" ] && [ -n "${API_BASE:-}" ]; then
         # Forward the api-resolved HUD_MODE as the variant — without it
         # this call rebuilds the overlay with an empty `?variant=` and
         # silently resets the boot-time variant the auto-overlay set.
+        # hudId goes with it for the same reason: omitting it falls back to
+        # "default" inside the route, which would quietly undo the custom HUD
+        # install_custom_hud just performed.
         curl -fsS -m 5 -X POST -o /dev/null \
              -H 'content-type: application/json' \
-             --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
+             --data "{\"hudId\":\"${HUD_ID:-default}\",\"variant\":\"${HUD_MODE:-horizontal}\"}" \
              "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
           || warn "early /api/overlay/start failed (will retry after cs2)"
       fi

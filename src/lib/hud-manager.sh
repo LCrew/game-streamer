@@ -24,6 +24,20 @@
 # "horizontal" because that's what the bundled default HUD's "default"
 # variant renders as (they're identical layouts).
 : "${HUD_MODE:=horizontal}"
+# Which HUD *bundle* to load, as opposed to which layout within it. Until the
+# panel grew a HUD library there was only ever one on disk, so this was
+# hardcoded to "default" in three places; the api now resolves it from a
+# broadcast_huds row and stamps it here. Still defaults to the bundled HUD, so
+# an api that has never heard of HUD_ID changes nothing.
+: "${HUD_ID:=default}"
+# Set only for an imported HUD: where to fetch its archive so JTs Hud Manager
+# can install it before the overlay opens. A builtin is already inside the
+# image and has nothing to download.
+: "${HUD_BUNDLE_URL:=}"
+# Downloaded archives live on the node cache mount, so a second pod on the same
+# node skips the fetch. Keyed by the api's slug, which never names two
+# different archives -- a re-import mints a new slug.
+: "${HUD_BUNDLE_CACHE:=${STEAM_LIBRARY:-/mnt/game-streamer}/huds}"
 # Injected into the overlay window by auto-overlay.patch, which reads it from
 # disk at did-finish-load. Unset it to run without the camera overlay.
 : "${HUD_CAMERA_OVERLAY_JS:=/opt/hud-manager/camera-overlay.js}"
@@ -34,7 +48,8 @@
 : "${API_TOKEN:=}"
 
 export HUD_BIN HUD_PORT HUD_GSI_PORT HUD_HOST HUD_USERDATA \
-       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_CAMERA_OVERLAY_JS SPEC_BASE
+       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_ID HUD_BUNDLE_URL \
+       HUD_CAMERA_OVERLAY_JS SPEC_BASE
 
 picom_running() { pgrep -x picom >/dev/null 2>&1; }
 
@@ -92,6 +107,12 @@ start_hud() {
   # `?variant=<v>` so the initial layout matches the api-resolved
   # default. --mute-audio so HUD SFX don't leak into the captured
   # stream via the cs2 null sink.
+  #
+  # Deliberately NOT given HUD_ID: an imported HUD is installed by
+  # install_custom_hud, which cannot run until this server is up, so at
+  # app-ready the builtin is the only hud id that exists. Booting the overlay
+  # on an id with nothing behind it renders a blank window and logs nothing.
+  # install_custom_hud re-opens the overlay itself once the bundle is in.
   HUD_PORT="$HUD_PORT" \
   GSI_PORT="$HUD_GSI_PORT" \
   HUD_AUTO_OVERLAY=1 \
@@ -124,6 +145,105 @@ wait_for_hud_server() {
 }
 
 stop_hud() { pkill -f "$HUD_BIN" 2>/dev/null || true; }
+
+# Install the imported HUD bundle into JTs Hud Manager, and leave HUD_ID naming
+# whatever it ended up as on disk.
+#
+# We hand it the archive rather than unpacking anything ourselves: JTHud's own
+# POST /api/huds/upload-zip is what creates ~/jthm-huds/<id>, and it is also
+# what verifies a signed bundle against the `key` file beside its hud.json. A
+# second unpacker here would be a second thing to keep in agreement with it.
+#
+# The id is read back out of the response instead of assumed, because JTHud
+# derives it itself -- from the top-level folder when hud.json sits one level
+# deep, otherwise from the filename we posted. Those disagree often enough that
+# guessing would open the overlay on a hud id that does not exist, which renders
+# a blank window and logs nothing.
+#
+# Every failure path leaves HUD_ID at the builtin. A stream with the stock HUD
+# is a far better outcome than a stream with no HUD, and the operator can still
+# switch at runtime once the cause is fixed.
+install_custom_hud() {
+  [ -z "$HUD_BUNDLE_URL" ] && return 0
+
+  if ! hud_server_up; then
+    warn "hud-manager not serving — cannot install the custom HUD, using the bundled one"
+    HUD_ID=default
+    return 1
+  fi
+
+  local slug archive response installed_id
+  # .../huds/<slug>/bundle.zip
+  slug=$(printf '%s\n' "$HUD_BUNDLE_URL" | sed -n 's#.*/huds/\([^/]*\)/bundle\.zip.*#\1#p')
+  if [ -z "$slug" ]; then
+    warn "could not read a HUD slug out of $HUD_BUNDLE_URL — using the bundled HUD"
+    HUD_ID=default
+    return 1
+  fi
+
+  mkdir -p "$HUD_BUNDLE_CACHE" 2>/dev/null || true
+  archive="$HUD_BUNDLE_CACHE/$slug.zip"
+
+  # A slug never names two different archives -- the panel mints a new one on
+  # re-import -- so a cached file is always the right bytes.
+  if [ -s "$archive" ]; then
+    log "custom HUD $slug already cached"
+  else
+    log "downloading custom HUD $slug"
+    # .part so an interrupted download is never mistaken for a cached archive
+    # by the next pod on this node.
+    if ! curl -fsS -m 120 -o "$archive.part" "$HUD_BUNDLE_URL"; then
+      rm -f "$archive.part"
+      warn "custom HUD download failed — using the bundled HUD"
+      HUD_ID=default
+      return 1
+    fi
+    mv -f "$archive.part" "$archive"
+  fi
+
+  log "installing custom HUD $slug into hud-manager"
+  response=$(curl -fsS -m 60 -X POST \
+    -F "hud=@${archive};type=application/zip;filename=${slug}.zip" \
+    "http://${HUD_HOST}:${HUD_PORT}/api/huds/upload-zip" 2>/dev/null) || {
+      warn "hud-manager rejected the custom HUD — using the bundled HUD"
+      HUD_ID=default
+      return 1
+    }
+
+  installed_id=$(printf '%s' "$response" | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(body, dict) and isinstance(body.get("id"), str):
+    print(body["id"])
+' 2>/dev/null)
+
+  if [ -z "$installed_id" ]; then
+    warn "hud-manager returned no HUD id — using the bundled HUD"
+    HUD_ID=default
+    return 1
+  fi
+
+  HUD_ID="$installed_id"
+  export HUD_ID
+  log "custom HUD installed as \"$HUD_ID\""
+
+  # Move the overlay onto it now. The boot auto-overlay opened the builtin
+  # because that was the only thing installed at app-ready; this is the switch,
+  # and doing it here rather than leaving it to a later caller means an imported
+  # HUD works on a pod that never seeds match data (no MATCH_ID, no API_BASE).
+  if ! curl -fsS -m 10 -X POST -o /dev/null \
+       -H 'content-type: application/json' \
+       --data "{\"hudId\":\"${HUD_ID}\",\"variant\":\"${HUD_MODE:-horizontal}\"}" \
+       "http://${HUD_HOST}:${HUD_PORT}/api/overlay/start"; then
+    warn "installed $HUD_ID but the overlay would not switch to it"
+    return 1
+  fi
+
+  return 0
+}
 
 # windowunmap alone is sometimes ignored by Electron windows; offscreen
 # move is the fallback.
