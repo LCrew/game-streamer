@@ -10,6 +10,15 @@ jobs:
   build-push-and-release:
     runs-on: ubuntu-latest
     steps:
+      # ghcr rejects a tag whose repository part has capitals, and
+      # github.repository_owner preserves the case of the org. Upstream never
+      # trips this because "5stackgg" is already lowercase; a fork whose owner
+      # is not (LCrew, say) fails every build-push with "repository name must
+      # be lowercase". Per-job because GITHUB_ENV does not cross jobs, and
+      # tr rather than ${VAR,,} so the same line is testable off-runner.
+      - name: Lowercase the owner for image refs
+        run: |
+          echo "OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
@@ -27,16 +36,16 @@ jobs:
         with:
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/game-streamer:latest
-            ghcr.io/${{ github.repository_owner }}/game-streamer:${{ github.sha }}
+            ghcr.io/${{ env.OWNER }}/game-streamer:latest
+            ghcr.io/${{ env.OWNER }}/game-streamer:${{ github.sha }}
           # Registry-backed cache: a dedicated :buildcache tag on ghcr stores
           # the layer cache across runs (no 10GB GHA-cache ceiling, survives
           # branch/PR boundaries). First build is a full rebuild; every
           # subsequent build reuses unchanged apt/steamcmd/CS2 layers.
           cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache
+            type=registry,ref=ghcr.io/${{ env.OWNER }}/game-streamer:buildcache
           cache-to: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache,mode=max
+            type=registry,ref=ghcr.io/${{ env.OWNER }}/game-streamer:buildcache,mode=max
 
       - name: Delete Package Versions
         uses: actions/delete-package-versions@v5
